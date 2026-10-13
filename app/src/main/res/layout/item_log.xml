@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="12dp"
+    android:background="#121212"
+    android:foreground="?attr/selectableItemBackground">
+
+    <TextView
+        android:id="@+id/titleTextView"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="#FFFFFF"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        android:ellipsize="middle"
+        android:maxLines="2"
+        tools:text="https://example.com/failed_video.mp4" />
+
+    <TextView
+        android:id="@+id/sizeTextView"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="#AAAAAA"
+        android:textSize="12sp"
+        android:layout_marginTop="2dp"
+        tools:text="ID: -1459302" />
+
+    <TextView
+        android:id="@+id/status_TextView"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="#FF5555"
+        android:textSize="12sp"
+        android:layout_marginTop="6dp"
+        android:fontFamily="monospace"
+        tools:text="Reason: HTTP_NOT_FOUND\nDetails: java.lang.Exception: Server returned HTTP 404" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginTop="12dp"
+        android:background="#333333"/>
+
+</LinearLayout>
