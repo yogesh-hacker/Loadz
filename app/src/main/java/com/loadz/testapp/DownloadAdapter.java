@@ -108,7 +108,7 @@ public class DownloadAdapter extends RecyclerView.Adapter<DownloadAdapter.Downlo
                 downloadedSizeText = formatBytes(file.length());
             }
         } else if (download.getStatus() == Status.FAILED && download.getError() != null) {
-            statusText = download.getError().name();
+            statusText = download.getError().name() + " - Tap to Retry";
         }
 
         holder.statusTextView.setText(statusText);
@@ -128,7 +128,11 @@ public class DownloadAdapter extends RecyclerView.Adapter<DownloadAdapter.Downlo
             holder.actionButton.setImageResource(R.drawable.ic_pause_circle);
             holder.actionButton.setOnClickListener(v -> actions.onPause(download.getId()));
         } else if (canResume) {
-            holder.actionButton.setImageResource(R.drawable.ic_play_circle);
+            if (download.getStatus() == Status.FAILED) {
+                holder.actionButton.setImageResource(R.drawable.ic_refresh);
+            } else {
+                holder.actionButton.setImageResource(R.drawable.ic_play_circle);
+            }
             holder.actionButton.setOnClickListener(v -> actions.onResume(download.getId()));
         } else if (isConverting) {
             // FIX 3: Explicitly handle CONVERTING so users can cancel FFmpeg, and to prevent recycled Share buttons

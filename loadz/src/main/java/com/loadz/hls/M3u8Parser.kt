@@ -79,13 +79,6 @@ class M3u8Parser(private val client: OkHttpClient) {
             }
         }
 
-        // Catch fMP4 streams which require init headers (not currently supported by standard TS merger)
-        if (m3u8Content.contains("#EXT-X-MAP:URI=")) {
-            // Note: You can expand your downloader later to grab this init file!
-            // For now, logging it is safer than downloading broken video segments.
-            android.util.Log.w("M3u8Parser", "Warning: Stream contains fMP4 EXT-X-MAP initialization. Merger may fail if not handled.")
-        }
-
         // 2. Parse Media Playlist for TS segments and AES-128 Encryption info
         val lines = m3u8Content.split("\n").map { it.trim() }
         val segments = mutableListOf<HlsSegment>()
@@ -99,6 +92,27 @@ class M3u8Parser(private val client: OkHttpClient) {
         for (line in lines) {
             if (line.startsWith("#EXT-X-MEDIA-SEQUENCE:")) {
                 mediaSequence = line.removePrefix("#EXT-X-MEDIA-SEQUENCE:").trim().toIntOrNull() ?: 0
+            } else if (line.startsWith("#EXT-X-MAP:")) {
+                val mapAttr = parseKeyAttributes(line.removePrefix("#EXT-X-MAP:"))
+                var rawUri = mapAttr["URI"] ?: ""
+                if (rawUri.startsWith("\"") && rawUri.endsWith("\"")) {
+                    rawUri = rawUri.substring(1, rawUri.length - 1)
+                }
+                
+                if (rawUri.isNotEmpty()) {
+                    val absoluteUrl = resolveUrl(currentM3u8Url, rawUri)
+                    segments.add(
+                        HlsSegment(
+                            index = segmentIndex,
+                            url = absoluteUrl,
+                            durationMs = 0L,
+                            keyUrl = null,
+                            ivHex = null,
+                            sequenceNumber = mediaSequence + segmentIndex
+                        )
+                    )
+                    segmentIndex++
+                }
             } else if (line.startsWith("#EXTINF:")) {
                 val durSecStr = line.removePrefix("#EXTINF:").substringBefore(",").trim()
                 val durSec = durSecStr.toDoubleOrNull() ?: 0.0

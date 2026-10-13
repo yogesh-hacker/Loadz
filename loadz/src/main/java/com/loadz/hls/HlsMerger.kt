@@ -14,7 +14,7 @@ class HlsMerger {
 
     fun mergeSegments(
         tempDir: File,
-        segmentCount: Int,
+        segments: List<HlsSegment>,
         targetFile: File,
         totalDurationMs: Long,
         onProgress: (Int) -> Unit,
@@ -22,48 +22,59 @@ class HlsMerger {
     ) {
         if (isCancelled()) throw CancellationException("Conversion Cancelled")
 
-        // 1. Always create the list.txt file for FFmpeg concat demuxer
-        val listFile = File(tempDir, "list.txt")
-        listFile.bufferedWriter().use { writer ->
-            for (index in 0 until segmentCount) {
-                val tsFile = File(tempDir, "segment_$index.ts")
-                writer.write("file '${tsFile.absolutePath}'\n")
+        // Generate Local M3U8 Playlist
+        val localM3u8File = File(tempDir, "local.m3u8")
+        localM3u8File.bufferedWriter().use { writer ->
+            writer.write("#EXTM3U\n")
+            writer.write("#EXT-X-VERSION:7\n")
+
+            // Calculate target duration (max duration across segments, min 1)
+            val maxDuration = segments.maxOfOrNull { it.durationMs } ?: 0L
+            var targetDurationSec = (maxDuration / 1000.0).toLong()
+            if (targetDurationSec <= 0) targetDurationSec = 10
+            writer.write("#EXT-X-TARGETDURATION:$targetDurationSec\n")
+
+            for (segment in segments) {
+                if (segment.durationMs == 0L) {
+                    // It's an fMP4 map initialization segment
+                    writer.write("#EXT-X-MAP:URI=\"segment_${segment.index}.ts\"\n")
+                } else {
+                    val durationSec = segment.durationMs / 1000.0
+                    writer.write("#EXTINF:$durationSec,\n")
+                    writer.write("segment_${segment.index}.ts\n")
+                }
             }
+            writer.write("#EXT-X-ENDLIST\n")
         }
 
-        // 2. Build FFmpeg command based on file extension
-        val isMp4OrMkv = targetFile.name.endsWith(".mp4", ignoreCase = true) ||
-                targetFile.name.endsWith(".mkv", ignoreCase = true)
+        // Build FFmpeg command to read local playlist
+        val ffmpegCommand =
+            "-allowed_extensions ALL -y -i \"${localM3u8File.absolutePath}\" -c copy \"${targetFile.absolutePath}\""
 
-        val ffmpegCommand = if (isMp4OrMkv) {
-            "-y -f concat -safe 0 -i \"${listFile.absolutePath}\" -c copy -bsf:a aac_adtstoasc \"${targetFile.absolutePath}\""
-        } else {
-            "-y -f concat -safe 0 -i \"${listFile.absolutePath}\" -c copy \"${targetFile.absolutePath}\""
-        }
-
-        // 3. Execute Async with Session-Specific Callbacks and Timed Latch
+        // Execute Async with Session-Specific Callbacks and Timed Latch
         val latch = CountDownLatch(1)
 
         val session = FFmpegKit.executeAsync(
             ffmpegCommand,
-            { _ -> 
+            { _ ->
                 // completeCallback
                 latch.countDown()
             },
-            { _ -> 
+            { _ ->
                 // logCallback (Ignored)
             },
-            { statistics -> 
+            { statistics ->
                 // statisticsCallback
                 if (statistics != null && totalDurationMs > 0) {
-                    val rawProgress = (statistics.time.toDouble() / totalDurationMs.toDouble()) * 100
+                    val rawProgress =
+                        (statistics.time.toDouble() / totalDurationMs.toDouble()) * 100
                     val estProgress = rawProgress.toInt().coerceIn(0, 99)
                     onProgress(estProgress)
                 }
             }
         )
 
-        // 4. Active Monitoring Loop for Cancellation
+        // Active Monitoring Loop for Cancellation
         while (!latch.await(250, TimeUnit.MILLISECONDS)) {
             if (isCancelled()) {
                 FFmpegKit.cancel(session.getSessionId())
@@ -71,7 +82,7 @@ class HlsMerger {
             }
         }
 
-        // 5. Evaluate Final Result
+        // Evaluate Final Result
         if (ReturnCode.isSuccess(session.getReturnCode())) {
             onProgress(100)
         } else if (ReturnCode.isCancel(session.getReturnCode())) {

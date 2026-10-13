@@ -142,10 +142,10 @@ public class MainActivity extends AppCompatActivity {
         recyclerView.setAdapter(adapter);
 
         String normalDemoUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4";
-        String hlsDemoUrl = "https://sderzk.ydc1wes.me/hls2/01/00011/1lujibe9qe3u_l/index-v1-a1.m3u8?t=juFqxgWa8oRfmCHjWX3LMZ2bj2duIFL0zCx1vvFcnJE&s=1791875947&e=21600&f=55637&i=0.0&sp=0";
+        String hlsDemoUrl = "https://moon.zenoak.top/vd/a2c4dWQxRXBOU1JRTjB4aVFFOUwydzp6NkVaUm5IQ25tT29aRzE1V1pWWlI0QTFWY2VRUGdoLXRneHVfeF9oY1Bn/master.m3u8";
 
         urlInput.setText(hlsDemoUrl);
-        headersInput.setText("{\"Referer\": \"https://speedostream1.com/\"}");
+        headersInput.setText("{\"Referer\": \"https://vidfast.vc/\"}");
 
         // Attach the global listener
         loadz.addListener(globalListener);

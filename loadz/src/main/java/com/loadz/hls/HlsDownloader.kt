@@ -8,6 +8,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -31,7 +32,10 @@ class HlsDownloader(
         val tempDir = File(baseTempDir, "hls_temp_${download.id}")
         if (!tempDir.exists()) tempDir.mkdirs()
 
-        // 1. Parse Playlist (Handles Master -> Media resolution, AES-128 key attributes)
+        // FIX: Clean up any orphan .tmp files from a previous force-close/crash
+        tempDir.listFiles { _, name -> name.endsWith(".tmp") }?.forEach { it.delete() }
+
+        // Parse Playlist
         val segments = parser.parsePlaylist(download.url, download.headers)
 
         if (segments.isEmpty()) {
@@ -51,20 +55,22 @@ class HlsDownloader(
         }
 
         val segmentsDoneCounter = AtomicInteger(segmentsDone)
-        
+
         synchronized(this@HlsDownloader) {
             download.segmentsDone = segmentsDone
             download.downloadedBytes = downloadedBytesCounter.get()
 
             if (segmentsDone > 0) {
-                download.totalBytes = (download.downloadedBytes / segmentsDone) * download.segmentsTotal
+                download.totalBytes =
+                    (download.downloadedBytes / segmentsDone) * download.segmentsTotal
             }
-            download.progress = if (download.segmentsTotal > 0) (segmentsDone * 100) / download.segmentsTotal else 0
+            download.progress =
+                if (download.segmentsTotal > 0) (segmentsDone * 100) / download.segmentsTotal else 0
             updateDbAndNotify(download) { it.onProgress(download, download.progress) }
         }
 
         try {
-            // 2. Download & Decrypt segments in parallel
+            // Download & Decrypt segments in parallel
             val parallelism = 10
             val channel = kotlinx.coroutines.channels.Channel<HlsSegment>(segments.size)
             segments.forEach { channel.trySend(it) }
@@ -72,6 +78,9 @@ class HlsDownloader(
 
             val lastUpdate = AtomicLong(System.currentTimeMillis())
             val lastDownloadedBytes = AtomicLong(downloadedBytesCounter.get())
+
+            // FIX: Thread-safe cache to prevent downloading the same AES key 10 times simultaneously
+            val keyCache = ConcurrentHashMap<String, ByteArray>()
 
             val downloadJobs = List(parallelism) {
                 launch(Dispatchers.IO) {
@@ -81,57 +90,88 @@ class HlsDownloader(
 
                         if (!tsFile.exists() || tsFile.length() == 0L) {
                             val tsFileTmp = File(tempDir, "segment_${segment.index}.tmp")
-                            
-                            // Fetch raw segment payload
-                            val request = Request.Builder().url(segment.url).apply {
-                                download.headers.forEach { (k, v) -> addHeader(k, v) }
-                            }.build()
 
-                            val rawBytes = client.newCall(request).execute().use { response ->
-                                if (!response.isSuccessful) throw Exception("HTTP ${response.code}: ${response.message}")
-                                response.body?.bytes() ?: throw Exception("Empty segment body")
+                            var success = false
+                            var attempts = 0
+                            var lastException: Exception? = null
+                            var finalBytes: ByteArray = ByteArray(0)
+
+                            // FIX: Per-segment retry logic (3 attempts) to survive flaky mobile networks
+                            while (attempts < 3 && !success) {
+                                try {
+                                    if (!isActive) throw CancellationException("Download Paused")
+
+                                    val request = Request.Builder().url(segment.url).apply {
+                                        download.headers.forEach { (k, v) -> addHeader(k, v) }
+                                    }.build()
+
+                                    val rawBytes =
+                                        client.newCall(request).execute().use { response ->
+                                            if (!response.isSuccessful) throw Exception("HTTP ${response.code}: ${response.message}")
+                                            response.body?.bytes()
+                                                ?: throw Exception("Empty segment body")
+                                        }
+
+                                    finalBytes = if (!segment.keyUrl.isNullOrEmpty()) {
+                                        // Use the cache! If it's not there, fetch it and put it in.
+                                        val keyBytes = keyCache.getOrPut(segment.keyUrl) {
+                                            decrypter.fetchKey(segment.keyUrl, download.headers)
+                                        }
+                                        decrypter.decryptSegment(
+                                            rawBytes,
+                                            keyBytes,
+                                            segment.ivHex,
+                                            segment.sequenceNumber
+                                        )
+                                    } else {
+                                        rawBytes
+                                    }
+
+                                    success = true
+                                } catch (e: CancellationException) {
+                                    throw e // Don't retry if the user intentionally paused
+                                } catch (e: Exception) {
+                                    lastException = e
+                                    attempts++
+                                    if (attempts < 3) delay(1000L * attempts) // Exponential backoff (1s, 2s)
+                                }
                             }
 
-                            // Decrypt segment if AES-128 key is present
-                            val finalBytes = if (!segment.keyUrl.isNullOrEmpty()) {
-                                val keyBytes = decrypter.fetchKey(segment.keyUrl, download.headers)
-                                decrypter.decryptSegment(
-                                    rawBytes,
-                                    keyBytes,
-                                    segment.ivHex,
-                                    segment.sequenceNumber
-                                )
-                            } else {
-                                rawBytes
+                            if (!success) {
+                                throw Exception("Segment ${segment.index} failed after 3 attempts: ${lastException?.message}")
                             }
 
-                            FileOutputStream(tsFileTmp).use { out ->
-                                out.write(finalBytes)
-                            }
-                            
+                            // Write safely
+                            FileOutputStream(tsFileTmp).use { out -> out.write(finalBytes) }
                             tsFileTmp.renameTo(tsFile) // Atomic write
 
-                            val currentBytes = downloadedBytesCounter.addAndGet(finalBytes.size.toLong())
+                            val currentBytes =
+                                downloadedBytesCounter.addAndGet(finalBytes.size.toLong())
                             val sDone = segmentsDoneCounter.incrementAndGet()
 
                             val now = System.currentTimeMillis()
                             val previousUpdate = lastUpdate.get()
                             val timeDiff = now - previousUpdate
-                            
+
                             if (timeDiff >= 1000) {
-                                // Use compareAndSet to ensure only one thread updates the metrics per second interval
                                 if (lastUpdate.compareAndSet(previousUpdate, now)) {
                                     val previousBytes = lastDownloadedBytes.getAndSet(currentBytes)
                                     val bytesDiff = currentBytes - previousBytes
-                                    
+
                                     download.bytesPerSecond = (bytesDiff * 1000) / timeDiff
                                     download.segmentsDone = sDone
                                     download.downloadedBytes = currentBytes
                                     if (sDone > 0) {
-                                        download.totalBytes = (currentBytes / sDone) * download.segmentsTotal
+                                        download.totalBytes =
+                                            (currentBytes / sDone) * download.segmentsTotal
                                     }
                                     download.progress = ((sDone * 100) / download.segmentsTotal)
-                                    updateDbAndNotify(download) { it.onProgress(download, download.progress) }
+                                    updateDbAndNotify(download) {
+                                        it.onProgress(
+                                            download,
+                                            download.progress
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -141,20 +181,19 @@ class HlsDownloader(
             downloadJobs.joinAll()
 
         } catch (e: CancellationException) {
-            throw e // Do NOT delete tempDir on pause/cancel so it can resume later
+            throw e
         } catch (e: Exception) {
-            // Keep tempDir on network errors as well to allow retry from where it left off
             throw e
         }
 
-        // 3. Merge TS segments natively and Remux to MP4 (shows live conversion progress!)
+        // Merge via Local Playlist mapping
         download.status = Status.CONVERTING
         updateDbAndNotify(download) { it.onConversion(download, 0) }
 
         try {
             merger.mergeSegments(
                 tempDir = tempDir,
-                segmentCount = segments.size,
+                segments = segments, // Passing the actual list of segments to generate local.m3u8
                 targetFile = targetFile,
                 totalDurationMs = download.totalDurationMs,
                 onProgress = { conversionProgress ->
@@ -167,7 +206,7 @@ class HlsDownloader(
             download.status = Status.COMPLETED
             updateDbAndNotify(download) { it.onCompleted(download) }
 
-            // Clean up temp data directory (deletes all .ts segments and keys completely!)
+            // Clean up temp data directory
             tempDir.deleteRecursively()
         } catch (e: CancellationException) {
             throw e
